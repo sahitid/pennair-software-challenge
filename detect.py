@@ -12,6 +12,15 @@ import math
 import cv2
 import numpy as np
 
+# given in the prompt. cx/cy are 0, which I am treating as "measure pixels
+# from the optical axis" and taking the optical axis as the image center.
+# K looks like it belongs to the 1920x1080 video, so fx/fy get scaled if
+# the frame is a different size (the static png is 960x540).
+K_FX = 2564.3186869
+K_FY = 2569.70273111
+CALIB_W = 1920.0
+CIRCLE_RADIUS_IN = 10.0
+
 
 def _odd(n):
     n = max(3, int(round(n)))
@@ -205,12 +214,64 @@ def find_shapes(bgr):
                 "area": a,
                 "radius": r,
                 "circ": circ,
+                "touches_border": _touches_border(c, w0, h0),
             }
         )
     return shapes, mask
 
 
-def draw(bgr, shapes):
+def _touches_border(contour, w, h, pad=3):
+    xs = contour[:, 0, 0]
+    ys = contour[:, 0, 1]
+    return (
+        xs.min() <= pad
+        or ys.min() <= pad
+        or xs.max() >= w - pad
+        or ys.max() >= h - pad
+    )
+
+
+def camera_xyz(shapes, frame_shape, last_z=None):
+    """Depth from the known 10in circle; x,y from the pinhole model.
+
+    Flat surface + camera looking roughly straight down => one Z for
+    every shape. If the circle is clipped or missing this frame, reuse
+    the last good depth (the plane didn't move).
+    """
+    h, w = frame_shape[:2]
+    scale = w / CALIB_W
+    fx = K_FX * scale
+    fy = K_FY * scale
+    # principal point: image center. see comment on K_FX.
+    cx0, cy0 = w / 2.0, h / 2.0
+
+    z = last_z
+    # anchor on the shape *classified* as a circle, not just any round-ish
+    # blob — the pentagon has circularity ~0.86 and used to get picked
+    # whenever the real circle was clipped at the frame edge, which read
+    # its bigger radius as the circle's and knocked ~15% off the depth.
+    circles = [
+        s
+        for s in shapes
+        if s["name"] == "circle" and not s["touches_border"] and s["radius"] > 5
+    ]
+    if circles:
+        circles.sort(key=lambda s: s["circ"], reverse=True)
+        r = circles[0]["radius"]
+        z = (fx * CIRCLE_RADIUS_IN) / r
+
+    for s in shapes:
+        if z is None:
+            s["xyz"] = None
+            continue
+        u, v = s["center"]
+        x = (u - cx0) * z / fx
+        y = (v - cy0) * z / fy
+        s["xyz"] = (x, y, z)
+    return z
+
+
+def draw(bgr, shapes, show_3d=True):
     out = bgr.copy()
     h, w = out.shape[:2]
     for s in shapes:
@@ -221,6 +282,9 @@ def draw(bgr, shapes):
         cv2.circle(out, (cx, cy), 4, (0, 0, 255), -1)
 
         label = f"{s['name']}  ({cx}, {cy})"
+        if show_3d and s.get("xyz") is not None:
+            x, y, z = s["xyz"]
+            label = f"{s['name']}  ({x:.0f}, {y:.0f}, {z:.0f}) in"
         tx = min(max(cx + 8, 4), w - 8)
         ty = max(cy - 8, 16)
         cv2.putText(

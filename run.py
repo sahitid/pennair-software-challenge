@@ -14,7 +14,7 @@ import time
 
 import cv2
 
-from detect import draw, find_shapes
+from detect import camera_xyz, draw, find_shapes
 
 
 def process_image(path, out_path, show=True):
@@ -22,12 +22,19 @@ def process_image(path, out_path, show=True):
     if img is None:
         sys.exit(f"couldn't read {path}")
     shapes, _mask = find_shapes(img)
+    camera_xyz(shapes, img.shape)
     vis = draw(img, shapes)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     cv2.imwrite(out_path, vis)
     print(f"wrote {out_path}  ({len(shapes)} shapes)")
     for s in shapes:
-        print(f"  {s['name']:10s} center=({s['center'][0]:.0f}, {s['center'][1]:.0f})")
+        xyz = s.get("xyz")
+        xyz_s = (
+            f"  xyz=({xyz[0]:.1f}, {xyz[1]:.1f}, {xyz[2]:.1f}) in"
+            if xyz is not None
+            else ""
+        )
+        print(f"  {s['name']:10s} center=({s['center'][0]:.0f}, {s['center'][1]:.0f}){xyz_s}")
     if show:
         cv2.imshow("shapes", vis)
         cv2.waitKey(0)
@@ -52,6 +59,7 @@ def process_video(path, out_path, show=True, max_frames=None):
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
 
+    last_z = None
     i = 0
     t0 = time.time()
     while True:
@@ -59,12 +67,13 @@ def process_video(path, out_path, show=True, max_frames=None):
         if not ok:
             break
         shapes, _ = find_shapes(frame)
+        last_z = camera_xyz(shapes, frame.shape, last_z)
         vis = draw(frame, shapes)
         writer.write(vis)
         i += 1
         if i % 30 == 0:
             dt = time.time() - t0
-            print(f"  frame {i}/{n}  {i/dt:.1f} fps")
+            print(f"  frame {i}/{n}  {i/dt:.1f} fps  z={last_z:.1f}in" if last_z else f"  frame {i}/{n}")
         if show:
             cv2.imshow("shapes", vis)
             if cv2.waitKey(1) & 0xFF == ord("q"):
